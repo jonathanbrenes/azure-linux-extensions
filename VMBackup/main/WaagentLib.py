@@ -23,7 +23,6 @@
 # http://msdn.microsoft.com/en-us/library/cc227259%28PROT.13%29.aspx
 #
 
-import crypt
 import random
 import base64
 
@@ -56,7 +55,73 @@ import zipfile
 import json
 import datetime
 import xml.sax.saxutils
-from distutils.version import LooseVersion
+
+cryptImported = False
+passLibImported = False
+
+try:
+    from crypt import crypt as crypt
+    cryptImported = True
+except ImportError:
+    pass
+
+if cryptImported == False:
+    if (sys.version_info[0] == 3 and sys.version_info[1] >= 13) or (sys.version_info[0] > 3):
+        try:
+            from legacycrypt import crypt
+            cryptImported = True
+        except ImportError:
+            pass
+
+if cryptImported == False:
+    try:
+        from passlib.hash import sha512_crypt
+        passLibImported = True
+    except ImportError:
+        pass
+
+try:
+    from distutils.version import LooseVersion
+except ImportError:
+    # distutils removed in Python 3.12; minimal shim for version comparisons
+    import re as _re
+    class LooseVersion(object):
+        def __init__(self, vstring):
+            self.vstring = str(vstring)
+            self._cmp_key = self._parse(self.vstring)
+        @staticmethod
+        def _parse(s):
+            parts = []
+            for tok in _re.split(r'(\d+)', s):
+                if tok.isdigit():
+                    parts.append(int(tok))
+                elif tok:
+                    parts.append(tok)
+            return parts
+        def __str__(self):
+            return self.vstring
+        def __repr__(self):
+            return 'LooseVersion(%r)' % self.vstring
+        def _cmp(self, other):
+            if not isinstance(other, LooseVersion):
+                other = LooseVersion(other)
+            a, b = self._cmp_key, other._cmp_key
+            for i in range(max(len(a), len(b))):
+                ai = a[i] if i < len(a) else 0
+                bi = b[i] if i < len(b) else 0
+                if type(ai) != type(bi):
+                    ai, bi = str(ai), str(bi)
+                if ai < bi:
+                    return -1
+                if ai > bi:
+                    return 1
+            return 0
+        def __lt__(self, other): return self._cmp(other) < 0
+        def __le__(self, other): return self._cmp(other) <= 0
+        def __eq__(self, other): return self._cmp(other) == 0
+        def __ge__(self, other): return self._cmp(other) >= 0
+        def __gt__(self, other): return self._cmp(other) > 0
+        def __ne__(self, other): return self._cmp(other) != 0
 
 if not hasattr(subprocess, 'check_output'):
     def check_output(*popenargs, **kwargs):
@@ -377,7 +442,16 @@ class AbstractDistro(object):
         collection = string.ascii_letters + string.digits
         salt = ''.join(random.choice(collection) for _ in range(salt_len))
         salt = "${0}${1}".format(crypt_id, salt)
-        return crypt.crypt(password, salt)
+
+        if cryptImported:
+            return crypt(password, salt)
+        elif passLibImported:
+            return sha512_crypt.hash(password)
+        else:
+            raise ImportError(
+                "Password hashing is unavailable. Install one of: 'crypt' (Python < 3.13), "
+                "'legacycrypt', or 'passlib'."
+            )
 
     def load_ata_piix(self):
         return WaAgent.TryLoadAtapiix()
@@ -4514,6 +4588,8 @@ def GetMyDistro(dist_class_name=''):
                 Distro = 'oracle'
             elif ('redhat'.lower() in Distro.lower()):
                 Distro = 'redhat'
+            elif ('azurelinux' in Distro.lower()):
+                Distro = 'fedora'
             elif ('Kali'.lower() in Distro.lower()):
                 Distro = 'Kali'
             elif ('FreeBSD'.lower() in  Distro.lower() or 'gaia'.lower() in Distro.lower() or 'panos'.lower() in Distro.lower()):
@@ -4555,6 +4631,21 @@ def DistInfo(fullname=0):
             return distinfo
         if 'Linux' in platform.system():
             distinfo = ["Default"]
+            # On Python 3.8+ linux_distribution is removed; detect via /etc/os-release
+            try:
+                with open("/etc/os-release", "r") as f:
+                    os_id, os_version = "", ""
+                    for line in f:
+                        k, _, v = line.strip().partition("=")
+                        v = v.strip('"')
+                        if k == "ID":
+                            os_id = v
+                        elif k == "VERSION_ID":
+                            os_version = v
+                    if os_id == "azurelinux":
+                        return ["azurelinux", os_version]
+            except Exception:
+                pass
             if "ubuntu" in platform.version().lower():
                 distinfo[0] = "Ubuntu"
             elif 'suse' in platform.version().lower():
